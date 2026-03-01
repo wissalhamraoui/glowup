@@ -1,5 +1,5 @@
 // GlowUp Service Worker for PWA
-const CACHE_NAME = 'glowup-v1';
+const CACHE_NAME = 'glowup-v2';
 const STATIC_ASSETS = [
   '/',
   '/manifest.json',
@@ -34,18 +34,39 @@ self.addEventListener('activate', (event) => {
 
 // Fetch event - serve from cache, fallback to network
 self.addEventListener('fetch', (event) => {
-  // Skip non-GET requests and API calls
-  if (event.request.method !== 'GET' || event.request.url.includes('/api/')) {
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Skip non-GET requests
+  if (request.method !== 'GET') {
+    return;
+  }
+
+  // Skip API calls - always fetch fresh
+  if (url.pathname.startsWith('/api/')) {
+    return;
+  }
+
+  // Skip chrome-extension and other non-http(s) schemes
+  if (!url.protocol.startsWith('http')) {
     return;
   }
 
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.match(request).then((cachedResponse) => {
       if (cachedResponse) {
+        // Return cached response and update cache in background
+        fetch(request).then((response) => {
+          if (response && response.status === 200) {
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(request, response);
+            });
+          }
+        }).catch(() => {});
         return cachedResponse;
       }
 
-      return fetch(event.request).then((response) => {
+      return fetch(request).then((response) => {
         // Don't cache non-successful responses
         if (!response || response.status !== 200 || response.type !== 'basic') {
           return response;
@@ -54,17 +75,17 @@ self.addEventListener('fetch', (event) => {
         // Clone the response for caching
         const responseToCache = response.clone();
         caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
+          cache.put(request, responseToCache);
+        }).catch(() => {});
 
         return response;
+      }).catch(() => {
+        // Return offline page for navigation requests
+        if (request.mode === 'navigate') {
+          return caches.match('/');
+        }
+        return new Response('', { status: 408, statusText: 'Offline' });
       });
-    }).catch(() => {
-      // Return offline page for navigation requests
-      if (event.request.mode === 'navigate') {
-        return caches.match('/');
-      }
-      return null;
     })
   );
 });

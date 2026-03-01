@@ -36,13 +36,53 @@ function adjustForEnergy(energy: string, softResetMode: boolean): { taskDuration
   }
 }
 
+function getFallbackTasks(taskDuration: number, breakDuration: number): Omit<StudyTask, 'id' | 'completed'>[] {
+  return [
+    { title: 'Review your materials', duration: taskDuration, type: 'study' },
+    { title: 'Take a short break', duration: breakDuration, type: 'break' },
+    { title: 'Practice with examples', duration: taskDuration, type: 'study' },
+    { title: 'Stretch and hydrate', duration: breakDuration, type: 'break' },
+    { title: 'Summarize what you learned', duration: taskDuration, type: 'study' },
+  ]
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { goal, energy, personality, softResetMode } = body
 
-    const zai = await ZAI.create()
+    if (!goal || typeof goal !== 'string') {
+      return NextResponse.json(
+        { error: 'Goal is required' },
+        { status: 400 }
+      )
+    }
+
     const { taskDuration, breakDuration, maxTasks } = adjustForEnergy(energy, softResetMode)
+
+    // Initialize AI SDK
+    let zai
+    try {
+      zai = await ZAI.create()
+    } catch (initError) {
+      console.error('Failed to initialize ZAI SDK:', initError)
+      // Return fallback tasks
+      const fallbackTasks = getFallbackTasks(taskDuration, breakDuration)
+      const validTasks: StudyTask[] = fallbackTasks.slice(0, maxTasks).map((task, index) => ({
+        id: `task-${Date.now()}-${index}`,
+        title: task.title,
+        duration: task.duration,
+        completed: false,
+        type: task.type,
+      }))
+      return NextResponse.json({
+        plan: {
+          goal,
+          tasks: validTasks,
+          createdAt: new Date().toISOString(),
+        },
+      })
+    }
 
     const systemPrompt = `You are a study plan generator for students. Create a micro-study plan based on the student's goal.
 ${getPersonalityStyle(personality)}
@@ -57,31 +97,31 @@ Generate ${Math.min(maxTasks, 6)} tasks for the goal. Mix study tasks with break
 Respond with ONLY a JSON array of tasks, no markdown, no explanation.
 Format: [{"title": "task name", "duration": number, "type": "study" or "break"}]`
 
-    const completion = await zai.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Create a study plan for: ${goal}` },
-      ],
-      temperature: 0.7,
-      max_tokens: 500,
-    })
-
-    const responseText = completion.choices[0]?.message?.content || '[]'
-    
-    // Parse the JSON response
     let tasks: Omit<StudyTask, 'id' | 'completed'>[] = []
+
     try {
-      // Clean up the response if it has markdown code blocks
-      const cleanedResponse = responseText.replace(/```json\n?|\n?```/g, '').trim()
-      tasks = JSON.parse(cleanedResponse)
-    } catch {
-      // Fallback tasks if parsing fails
-      tasks = [
-        { title: 'Review your materials', duration: taskDuration, type: 'study' },
-        { title: 'Take a short break', duration: breakDuration, type: 'break' },
-        { title: 'Practice with examples', duration: taskDuration, type: 'study' },
-        { title: 'Stretch and hydrate', duration: breakDuration, type: 'break' },
-      ]
+      const completion = await zai.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Create a study plan for: ${goal}` },
+        ],
+        temperature: 0.7,
+        max_tokens: 500,
+      })
+
+      const responseText = completion.choices[0]?.message?.content || '[]'
+      
+      // Parse the JSON response
+      try {
+        // Clean up the response if it has markdown code blocks
+        const cleanedResponse = responseText.replace(/```json\n?|\n?```/g, '').trim()
+        tasks = JSON.parse(cleanedResponse)
+      } catch {
+        tasks = getFallbackTasks(taskDuration, breakDuration)
+      }
+    } catch (aiError) {
+      console.error('AI completion error:', aiError)
+      tasks = getFallbackTasks(taskDuration, breakDuration)
     }
 
     // Ensure we have valid tasks
